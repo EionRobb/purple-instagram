@@ -528,8 +528,12 @@ ig_add_buddy_from_json(InstagramAccount *ia, JsonObject *user)
 	}
 	
 	if (!json_object_get_boolean_member(user, "has_anonymous_profile_picture")) {
-		g_dataset_set_data_full(buddy, "profile_pic_url", g_strdup(profile_pic_url), NULL);
-		ig_fetch_url_with_method(ia, "GET", profile_pic_url, NULL, ig_got_profile_pic, buddy);
+		const gchar *checksum = purple_buddy_icons_get_checksum_for_user(buddy);
+		
+		if (!purple_strequal(checksum, profile_pic_url)) {
+			g_dataset_set_data_full(buddy, "profile_pic_url", g_strdup(profile_pic_url), NULL);
+			ig_fetch_url_with_method(ia, "GET", profile_pic_url, NULL, ig_got_profile_pic, buddy);
+		}
 	}
 	
 	PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
