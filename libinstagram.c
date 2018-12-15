@@ -68,10 +68,15 @@ typedef struct {
 	PurpleConnection *pc;
 
 	GHashTable *cookie_table;
+	GHashTable *user_ids;
 
 	GSList *http_conns; /**< PurpleHttpConnection to be cancelled on logout */
 	gchar *challenge_url;
 	gchar *csrftoken;
+	gchar *device_id;
+	gint64 last_message_timestamp;
+	
+	guint heartbeat_timeout;
 } InstagramAccount;
 
 
@@ -205,7 +210,7 @@ ig_response_callback(PurpleHttpConnection *http_conn,
 	body_len = len;
 
 	if (body == NULL && error_message != NULL) {
-		/* connection error - unersolvable dns name, non existing server */
+		/* connection error - unresolvable dns name, non existing server */
 		gchar *error_msg_formatted = g_strdup_printf(_("Connection error: %s."), error_message);
 		purple_connection_error(conn->ia->pc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR, error_msg_formatted);
 		g_free(error_msg_formatted);
@@ -321,6 +326,43 @@ ig_get_or_create_default_group()
 	return ig_group;
 }
 
+static void ig_find_user(InstagramAccount *ia, const gchar *username, InstagramProxyCallbackFunc callback, gpointer user_data);
+
+static void
+ig_send_im_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	JsonObject *obj = json_node_get_object(node);
+	
+	gchar *message = user_data;
+	
+	if (node != NULL) {
+		GString *postdata = g_string_new(NULL);
+		gchar *uuid = purple_uuid_random();
+		gchar *context = purple_uuid_random();
+		gint64 pk = json_object_get_int_member(obj, "pk");
+		
+		g_string_append_printf(postdata, "_csrftoken=%s&", purple_url_encode(ia->csrftoken));
+		g_string_append_printf(postdata, "device_id=%s&", purple_url_encode(ia->device_id));
+		g_string_append_printf(postdata, "_uuid=%s&", purple_url_encode(uuid));
+		g_string_append_printf(postdata, "recipient_users=[[%u]]&", (guint) pk);
+		g_string_append_printf(postdata, "client_context=%s&", purple_url_encode(context));
+		g_string_append_printf(postdata, "text=%s&", purple_url_encode(message));
+		
+		ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/direct_v2/threads/broadcast/text/", postdata->str, NULL /* TODO check response */, NULL);
+		
+		//TODO store context into hashtable
+		g_free(context);
+		g_free(uuid);
+		g_string_free(postdata, TRUE);
+		
+	} else {
+		//purple_conversation_present_error(who, da->account, _("Unknown user, cannot send."));
+	
+	}
+	
+	g_free(message);
+}
+
 static int
 ig_send_im(PurpleConnection *pc,
 #if PURPLE_VERSION_CHECK(3, 0, 0)
@@ -334,33 +376,47 @@ ig_send_im(PurpleConnection *pc,
 #endif
 	
 	InstagramAccount *ia = purple_connection_get_protocol_data(pc);
-	PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, who);
-	PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
-	gint pk = purple_blist_node_get_int(blistnode, "pk");
+	gint pk = 0;
 	
-	if (pk > 0) {
+	pk = GPOINTER_TO_INT(g_hash_table_lookup(ia->user_ids, who));
+	
+	if (pk == 0) {
+		PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, who);
+		
+		if (buddy != NULL) {
+			PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
+			pk = purple_blist_node_get_int(blistnode, "pk");
+			
+			g_hash_table_replace(ia->user_ids, (gpointer) who, GINT_TO_POINTER(pk));
+		}
+	}
+	
+	if (pk != 0) {
 		//https://i.instagram.com/api/v1/direct_v2/threads/broadcast/text/
 		GString *postdata = g_string_new(NULL);
 		gchar *uuid = purple_uuid_random();
 		gchar *context = purple_uuid_random();
 		
 		g_string_append_printf(postdata, "_csrftoken=%s&", purple_url_encode(ia->csrftoken));
-		g_string_append_printf(postdata, "device_id=android-0cb11ca0b4eb1535&");
+		g_string_append_printf(postdata, "device_id=%s&", purple_url_encode(ia->device_id));
 		g_string_append_printf(postdata, "_uuid=%s&", purple_url_encode(uuid));
-		g_string_append_printf(postdata, "recipient_users=[[%d]]&", pk);
+		g_string_append_printf(postdata, "recipient_users=[[%u]]&", (guint) pk);
 		g_string_append_printf(postdata, "client_context=%s&", purple_url_encode(context));
 		g_string_append_printf(postdata, "text=%s&", purple_url_encode(message));
 		
-		ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/direct_v2/threads/broadcast/text/", postdata->str, NULL /* TODO check response */, buddy);
+		ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/direct_v2/threads/broadcast/text/", postdata->str, NULL /* TODO check response */, NULL);
 		
-		//TODO store into hashtable
+		//TODO store context into hashtable
 		g_free(context);
 		g_free(uuid);
+		g_string_free(postdata, TRUE);
 		
-		return 0;
+		return 1;
 	}
 	
-	return -1;
+	ig_find_user(ia, who, ig_send_im_found_user, g_strdup(message));
+	
+	return 0;
 }
 
 static const char *
@@ -394,6 +450,7 @@ ig_got_profile_pic(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 		const gchar *response_str;
 		gsize response_len;
 		gpointer response_dup;
+		const gchar *profile_pic_url = g_dataset_get_data(buddy, "profile_pic_url");
 
 		response_str = g_dataset_get_data(node, "raw_body");
 		response_len = json_object_get_int_member(response, "len");
@@ -401,8 +458,83 @@ ig_got_profile_pic(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 
 		const gchar *username = purple_buddy_get_name(buddy);
 		
-		purple_buddy_icons_set_for_user(ia->account, username, response_dup, response_len, NULL /*TODO - set url*/);
+		purple_buddy_icons_set_for_user(ia->account, username, response_dup, response_len, profile_pic_url);
 	}
+	
+	g_dataset_destroy(buddy);
+}
+
+static void
+ig_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	InstagramProxyConnection *conn = user_data;
+	JsonObject *obj = json_node_get_object(node);
+	JsonArray *users = json_object_get_array_member(obj, "users");
+	guint users_len = json_array_get_length(users);
+	const gchar *orig_username = g_dataset_get_data(conn, "username");
+	guint i;
+	
+	for (i = 0; i < users_len; i++) {
+		JsonObject *user = json_array_get_object_element(users, i);
+		
+		gint pk = (gint) json_object_get_int_member(user, "pk");
+		const gchar *username = json_object_get_string_member(user, "username");
+		
+		if (purple_strequal(username, orig_username)) {
+			JsonNode *user_node = json_array_get_element(users, i);
+			conn->callback(ia, user_node, conn->user_data);
+		}
+		
+		g_hash_table_replace(ia->user_ids, (gpointer) username, GINT_TO_POINTER(pk));
+	}
+	
+	g_dataset_destroy(conn);
+	
+	g_free(conn);
+}
+
+static void
+ig_find_user(InstagramAccount *ia, const gchar *username, InstagramProxyCallbackFunc callback, gpointer user_data) {
+	gchar *url = g_strdup_printf(IG_URL_PREFIX "/users/search/?is_typehead=false&q=%s", purple_url_encode(username));
+	
+	InstagramProxyConnection *conn = g_new0(InstagramProxyConnection, 1);
+	conn->ia = ia;
+	conn->callback = callback;
+	conn->user_data = user_data;
+	
+	g_dataset_set_data_full(conn, "username", g_strdup(username), g_free);
+	
+	ig_fetch_url_with_method(ia, "GET", url, NULL, ig_found_user, conn);
+	
+	g_free(url);
+}
+
+static void
+ig_add_buddy_from_json(InstagramAccount *ia, JsonObject *user)
+{
+	gint pk = (gint) json_object_get_int_member(user, "pk");
+	const gchar *username = json_object_get_string_member(user, "username");
+	const gchar *full_name = json_object_get_string_member(user, "full_name");
+	const gchar *profile_pic_url = json_object_get_string_member(user, "profile_pic_url");
+	
+	PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, username);
+
+	if (buddy == NULL) {
+		buddy = purple_buddy_new(ia->account, username, full_name);
+		purple_blist_add_buddy(buddy, NULL, ig_get_or_create_default_group(), NULL);
+	}
+	
+	if (!json_object_get_boolean_member(user, "has_anonymous_profile_picture")) {
+		g_dataset_set_data_full(buddy, "profile_pic_url", g_strdup(profile_pic_url), NULL);
+		ig_fetch_url_with_method(ia, "GET", profile_pic_url, NULL, ig_got_profile_pic, buddy);
+	}
+	
+	PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
+	purple_blist_node_set_int(blistnode, "pk", pk);
+	
+	purple_protocol_got_user_status(ia->account, username, "online", NULL);
+	
+	g_hash_table_replace(ia->user_ids, (gpointer) username, GINT_TO_POINTER(pk));
 }
 
 static void
@@ -437,33 +569,112 @@ ig_friends_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 	for (i = json_array_get_length(users) - 1; i >= 0; i--) {
 		JsonObject *user = json_array_get_object_element(users, i);
 		
-		gint64 pk = json_object_get_int_member(user, "pk");
-		const gchar *username = json_object_get_string_member(user, "username");
-		const gchar *full_name = json_object_get_string_member(user, "full_name");
-		const gchar *profile_pic_url = json_object_get_string_member(user, "profile_pic_url");
-		
-		PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, username);
-
-		if (buddy == NULL) {
-			buddy = purple_buddy_new(ia->account, username, full_name);
-			purple_blist_add_buddy(buddy, NULL, ig_get_or_create_default_group(), NULL);
-		}
-		
-		if (!json_object_get_boolean_member(user, "has_anonymous_profile_picture")) {
-			ig_fetch_url_with_method(ia, "GET", profile_pic_url, NULL, ig_got_profile_pic, buddy);
-		}
-		
-		PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
-		purple_blist_node_set_int(blistnode, "pk", pk);
+		ig_add_buddy_from_json(ia, user);
 	}
 	
 }
 
+static void
+ig_thread_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	JsonObject *obj = json_node_get_object(node);
+	JsonObject *thread = json_object_get_object_member(obj, "thread");
+	gint last_message_timestamp = GPOINTER_TO_INT(user_data);
+	
+	if (!json_object_get_boolean_member(thread, "is_group")) {
+		// This is a one-to-one DM
+		
+		JsonObject *user = json_array_get_object_element(json_object_get_array_member(thread, "users"), 0);
+		gint64 user_id = json_object_get_int_member(user, "pk");
+		const gchar *username = json_object_get_string_member(user, "username");
+		
+		JsonArray *items = json_object_get_array_member(thread, "items");
+		gint i;
+		for (i = json_array_get_length(items) - 1; i >= 0; i--) {
+			JsonObject *item = json_array_get_object_element(items, i);
+			gint64 timestamp_us = json_object_get_int_member(item, "timestamp");
+			gint timestamp = (gint) (timestamp_us / 1000000);
+			
+			if (timestamp < last_message_timestamp) {
+				continue;
+			}
+			
+			gint64 sender = json_object_get_int_member(item, "user_id");
+			const gchar *item_type = json_object_get_string_member(item, "item_type");
+			const gchar *text = json_object_get_string_member(item, "text");
+			
+			if (purple_strequal(item_type, "text")) {
+				if (sender == user_id) {
+					purple_serv_got_im(ia->pc, username, text, PURPLE_MESSAGE_RECV, timestamp);
+					
+				} else {
+					PurpleConversation *conv;
+					PurpleIMConversation *imconv;
+					PurpleMessage *msg;
+					
+					imconv = purple_conversations_find_im_with_account(username, ia->account);
+
+					if (imconv == NULL) {
+						imconv = purple_im_conversation_new(ia->account, username);
+					}
+
+					conv = PURPLE_CONVERSATION(imconv);
+
+					if (text && *text) {
+						msg = purple_message_new_outgoing(username, text, PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND | PURPLE_MESSAGE_DELAYED);
+						purple_message_set_time(msg, timestamp);
+						purple_conversation_write_message(conv, msg);
+						purple_message_destroy(msg);
+					}
+				}
+			}
+		}
+	}
+}
 
 static void
 ig_inbox_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 {
-	//JsonObject *obj = json_node_get_object(node);
+	JsonObject *obj = json_node_get_object(node);
+	JsonObject *inbox = json_object_get_object_member(obj, "inbox");
+	JsonArray *threads = json_object_get_array_member(inbox, "threads");
+	gint i;
+	gint64 max_last_activity = 0;
+	gint last_message_timestamp = (gint) (ia->last_message_timestamp / 1000000);
+	
+	for (i = json_array_get_length(threads) - 1; i >= 0; i--) {
+		JsonObject *thread = json_array_get_object_element(threads, i);
+		
+		if (!json_object_get_boolean_member(thread, "is_group")) {
+			// This is a one-to-one DM
+			JsonObject *user = json_array_get_object_element(json_object_get_array_member(thread, "users"), 0);
+			ig_add_buddy_from_json(ia, user);
+		}
+		
+		//Use last_activity_at to work out if there's a newer message
+		gint64 last_activity_at = json_object_get_int_member(thread, "last_activity_at");
+		if (ia->last_message_timestamp && last_activity_at > ia->last_message_timestamp) {
+			const gchar *thread_id = json_object_get_string_member(thread, "thread_id");
+			gchar *thread_url = g_strdup_printf(IG_URL_PREFIX "/direct_v2/threads/%s/", thread_id);
+			ig_fetch_url_with_method(ia, "GET", thread_url, NULL, ig_thread_cb, GINT_TO_POINTER(last_message_timestamp));
+			
+		}
+		max_last_activity = MAX(max_last_activity, last_activity_at);
+	}
+	
+	purple_account_set_int(ia->account, "last_message_timestamp_high", max_last_activity >> 32);
+	purple_account_set_int(ia->account, "last_message_timestamp_low", max_last_activity & 0xFFFFFFFF);
+	ia->last_message_timestamp = max_last_activity;
+}
+
+static gboolean
+ig_inbox_polling(gpointer userdata)
+{
+	InstagramAccount *ia = userdata;
+	
+	ig_fetch_url_with_method(ia, "GET", IG_URL_PREFIX "/direct_v2/inbox/", NULL, ig_inbox_cb, NULL);
+
+	return TRUE;
 }
 
 static void
@@ -474,9 +685,10 @@ ig_login_successful(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 	ig_fetch_url_with_method(ia, "GET", IG_URL_PREFIX "/friendships/autocomplete_user_list/?version=2&followinfo=True", NULL, ig_friends_cb, NULL);
 	
 	ig_fetch_url_with_method(ia, "GET", IG_URL_PREFIX "/direct_v2/inbox/", NULL, ig_inbox_cb, NULL);
+	ia->heartbeat_timeout = g_timeout_add_seconds(60, ig_inbox_polling, ia);
 	
 	if (node != NULL) {
-		
+		//TODO use self-user info for downloading own avatar and stuff
 	}
 }
 
@@ -524,7 +736,7 @@ ig_login_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 		} else if (purple_strequal(json_object_get_string_member(response, "error_type"), "checkpoint_challenge_required")) {
 			JsonObject *challenge = json_object_get_object_member(response, "challenge");
 			const gchar *challenge_api_path = json_object_get_string_member(challenge, "api_path");
-			//"api_path": "/challenge/1234567890/asdfgqwert/",
+			//"api_path": "/challenge/1234567890/qwertyuiop/",
 			
 			ia->challenge_url = g_strdup_printf("%s%s", IG_URL_PREFIX, challenge_api_path);
 			ig_fetch_url_with_method(ia, "POST", ia->challenge_url, "choice=1", NULL, NULL);
@@ -554,6 +766,19 @@ ig_login(PurpleAccount *account)
 	ia->account = account;
 	ia->pc = pc;
 	ia->cookie_table = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+	ia->user_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	ia->device_id = g_strdup(purple_account_get_string(ia->account, "device_id", NULL));
+	
+	if (ia->device_id == NULL) {
+		ia->device_id = g_strdup_printf("android-%08x%08x", g_random_int(), g_random_int());
+		purple_account_set_string(ia->account, "device_id", ia->device_id);
+	}
+	
+	ia->last_message_timestamp = purple_account_get_int(account, "last_message_timestamp_high", 0);
+
+	if (ia->last_message_timestamp != 0) {
+		ia->last_message_timestamp = (ia->last_message_timestamp << 32) | ((guint64) purple_account_get_int(account, "last_message_timestamp_low", 0) & 0xFFFFFFFF);
+	}
 	
 	const gchar *cookies = purple_account_get_string(ia->account, "cookies", NULL);
 	if (cookies != NULL) {
@@ -568,18 +793,18 @@ ig_login(PurpleAccount *account)
 		}
 		g_strfreev(cookie_pieces);
 		
-		ig_login_successful(ia, NULL, NULL);
-		purple_connection_set_state(pc, PURPLE_CONNECTION_CONNECTING);
-	
-		return;
+		if (ia->csrftoken) {
+			ig_login_successful(ia, NULL, NULL);
+			return;
+		}
 	}
-	//{"_csrftoken":"missing","device_id":"android-0cc175b9c0f1b6a8","_uuid":"2054c23b-c842-48e9-bcde-463192356941","username":"a","password":"a","login_attempt_count":0}
+	
 	JsonObject *obj = json_object_new();
 	gchar *uuid = purple_uuid_random();
 	gchar *postdata;
 	
 	json_object_set_string_member(obj, "_csrftoken", "missing");
-	json_object_set_string_member(obj, "device_id", "android-0cc175b9c0f1b6a8"); //TODO generate device_id
+	json_object_set_string_member(obj, "device_id", ia->device_id);
 	json_object_set_string_member(obj, "_uuid", uuid);
 	json_object_set_string_member(obj, "username", purple_account_get_username(account));
 	json_object_set_string_member(obj, "password", purple_connection_get_password(pc));
@@ -603,7 +828,11 @@ ig_close(PurpleConnection *pc)
 	InstagramAccount *ia = purple_connection_get_protocol_data(pc);
 
 	g_return_if_fail(ia != NULL);
-
+	
+	if (ia->heartbeat_timeout) {
+		g_source_remove(ia->heartbeat_timeout);
+	}
+	
 	while (ia->http_conns) {
 		purple_http_conn_cancel(ia->http_conns->data);
 		ia->http_conns = g_slist_delete_link(ia->http_conns, ia->http_conns);
