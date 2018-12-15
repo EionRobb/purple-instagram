@@ -398,7 +398,7 @@ ig_get_info(PurpleConnection *pc, const gchar *who)
 			PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
 			pk = purple_blist_node_get_int(blistnode, "pk");
 			
-			g_hash_table_replace(ia->user_ids, (gpointer) who, GINT_TO_POINTER(pk));
+			g_hash_table_replace(ia->user_ids, g_strdup(who), GINT_TO_POINTER(pk));
 		}
 	}
 	
@@ -489,7 +489,7 @@ ig_send_im(PurpleConnection *pc,
 			PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
 			pk = purple_blist_node_get_int(blistnode, "pk");
 			
-			g_hash_table_replace(ia->user_ids, (gpointer) who, GINT_TO_POINTER(pk));
+			g_hash_table_replace(ia->user_ids, g_strdup(who), GINT_TO_POINTER(pk));
 		}
 	}
 	
@@ -594,7 +594,7 @@ ig_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 			conn->callback(ia, user_node, conn->user_data);
 		}
 		
-		g_hash_table_replace(ia->user_ids, (gpointer) username, GINT_TO_POINTER(pk));
+		g_hash_table_replace(ia->user_ids, g_strdup(username), GINT_TO_POINTER(pk));
 	}
 	
 	g_dataset_destroy(conn);
@@ -647,7 +647,7 @@ ig_add_buddy_from_json(InstagramAccount *ia, JsonObject *user)
 	
 	purple_protocol_got_user_status(ia->account, username, "online", NULL);
 	
-	g_hash_table_replace(ia->user_ids, (gpointer) username, GINT_TO_POINTER(pk));
+	g_hash_table_replace(ia->user_ids, g_strdup(username), GINT_TO_POINTER(pk));
 }
 
 static void
