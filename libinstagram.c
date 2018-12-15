@@ -77,6 +77,7 @@ typedef struct {
 	gint64 last_message_timestamp;
 	
 	guint heartbeat_timeout;
+	PurpleHttpKeepalivePool *keepalive_pool;
 } InstagramAccount;
 
 
@@ -301,6 +302,8 @@ ig_fetch_url_with_method(InstagramAccount *ia, const gchar *method, const gchar 
 			purple_http_request_set_contents(request, postdata, -1);
 		}
 	}
+	
+	purple_http_request_set_keepalive_pool(request, ia->keepalive_pool);
 
 	http_conn = purple_http_request(ia->pc, request, ig_response_callback, conn);
 	purple_http_request_unref(request);
@@ -768,6 +771,7 @@ ig_login(PurpleAccount *account)
 	ia->cookie_table = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 	ia->user_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 	ia->device_id = g_strdup(purple_account_get_string(ia->account, "device_id", NULL));
+	ia->keepalive_pool = purple_http_keepalive_pool_new();
 	
 	if (ia->device_id == NULL) {
 		ia->device_id = g_strdup_printf("android-%08x%08x", g_random_int(), g_random_int());
@@ -837,6 +841,8 @@ ig_close(PurpleConnection *pc)
 		purple_http_conn_cancel(ia->http_conns->data);
 		ia->http_conns = g_slist_delete_link(ia->http_conns, ia->http_conns);
 	}
+	
+	purple_http_keepalive_pool_unref(ia->keepalive_pool);
 
 	// Save cookies to accounts.xml to login with later
 	gchar *cookies = ig_cookies_to_string(ia);
