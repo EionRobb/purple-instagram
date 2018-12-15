@@ -71,6 +71,7 @@ typedef struct {
 
 	GSList *http_conns; /**< PurpleHttpConnection to be cancelled on logout */
 	gchar *challenge_url;
+	gchar *csrftoken;
 } InstagramAccount;
 
 
@@ -156,6 +157,11 @@ ig_update_cookies(InstagramAccount *ia, const GList *cookie_headers)
 				cookie_start = cookie_end;
 
 				g_hash_table_replace(ia->cookie_table, cookie_name, cookie_value);
+				
+				if (purple_strequal(cookie_name, "csrftoken")) {
+					g_free(ia->csrftoken);
+					ia->csrftoken = g_strdup(cookie_value);
+				}
 			}
 		}
 	}
@@ -302,6 +308,60 @@ ig_fetch_url_with_method(InstagramAccount *ia, const gchar *method, const gchar 
 	g_free(cookies);
 }
 
+static PurpleGroup *
+ig_get_or_create_default_group()
+{
+	PurpleGroup *ig_group = purple_blist_find_group("Instagram");
+
+	if (!ig_group) {
+		ig_group = purple_group_new("Instagram");
+		purple_blist_add_group(ig_group, NULL);
+	}
+
+	return ig_group;
+}
+
+static int
+ig_send_im(PurpleConnection *pc,
+#if PURPLE_VERSION_CHECK(3, 0, 0)
+				PurpleMessage *msg)
+{
+	const gchar *who = purple_message_get_recipient(msg);
+	const gchar *message = purple_message_get_contents(msg);
+#else
+				const gchar *who, const gchar *message, PurpleMessageFlags flags)
+{
+#endif
+	
+	InstagramAccount *ia = purple_connection_get_protocol_data(pc);
+	PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, who);
+	PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
+	gint pk = purple_blist_node_get_int(blistnode, "pk");
+	
+	if (pk > 0) {
+		//https://i.instagram.com/api/v1/direct_v2/threads/broadcast/text/
+		GString *postdata = g_string_new(NULL);
+		gchar *uuid = purple_uuid_random();
+		gchar *context = purple_uuid_random();
+		
+		g_string_append_printf(postdata, "_csrftoken=%s&", purple_url_encode(ia->csrftoken));
+		g_string_append_printf(postdata, "device_id=android-0cb11ca0b4eb1535&");
+		g_string_append_printf(postdata, "_uuid=%s&", purple_url_encode(uuid));
+		g_string_append_printf(postdata, "recipient_users=[[%d]]&", pk);
+		g_string_append_printf(postdata, "client_context=%s&", purple_url_encode(context));
+		g_string_append_printf(postdata, "text=%s&", purple_url_encode(message));
+		
+		ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/direct_v2/threads/broadcast/text/", postdata->str, NULL /* TODO check response */, buddy);
+		
+		//TODO store into hashtable
+		g_free(context);
+		g_free(uuid);
+		
+		return 0;
+	}
+	
+	return -1;
+}
 
 static const char *
 ig_list_icon(PurpleAccount *account, PurpleBuddy *buddy)
@@ -325,9 +385,109 @@ ig_status_types(PurpleAccount *account)
 }
 
 static void
+ig_got_profile_pic(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	PurpleBuddy *buddy = user_data;
+
+	if (node != NULL) {
+		JsonObject *response = json_node_get_object(node);
+		const gchar *response_str;
+		gsize response_len;
+		gpointer response_dup;
+
+		response_str = g_dataset_get_data(node, "raw_body");
+		response_len = json_object_get_int_member(response, "len");
+		response_dup = g_memdup(response_str, response_len);
+
+		const gchar *username = purple_buddy_get_name(buddy);
+		
+		purple_buddy_icons_set_for_user(ia->account, username, response_dup, response_len, NULL /*TODO - set url*/);
+	}
+}
+
+static void
+ig_friends_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	/*{
+	"expires": 1538638782,
+	"users": [{
+		"pk": 25025320,
+		"username": "instagram",
+		"full_name": "Instagram",
+		"is_private": false,
+		"profile_pic_url": "https://instagram.fakl1-1.fna.fbcdn.net/vp/ca89afc73ba2b787ed1621db3f534ea6/5C150A5B/t51.2885-19/s150x150/14719833_310540259320655_1605122788543168512_a.jpg",
+		"profile_pic_id": "1360316971354486387_25025320",
+		"friendship_status": {
+			"following": true,
+			"is_private": false,
+			"incoming_request": false,
+			"outgoing_request": false,
+			"is_bestie": false
+		},
+		"is_verified": true,
+		"has_anonymous_profile_picture": false,
+		"reel_auto_archive": "on"
+	}],
+	"status": "ok"
+	*/
+	JsonObject *obj = json_node_get_object(node);
+	JsonArray *users = json_object_get_array_member(obj, "users");
+	gint i;
+	
+	for (i = json_array_get_length(users) - 1; i >= 0; i--) {
+		JsonObject *user = json_array_get_object_element(users, i);
+		
+		gint64 pk = json_object_get_int_member(user, "pk");
+		const gchar *username = json_object_get_string_member(user, "username");
+		const gchar *full_name = json_object_get_string_member(user, "full_name");
+		const gchar *profile_pic_url = json_object_get_string_member(user, "profile_pic_url");
+		
+		PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, username);
+
+		if (buddy == NULL) {
+			buddy = purple_buddy_new(ia->account, username, full_name);
+			purple_blist_add_buddy(buddy, NULL, ig_get_or_create_default_group(), NULL);
+		}
+		
+		if (!json_object_get_boolean_member(user, "has_anonymous_profile_picture")) {
+			ig_fetch_url_with_method(ia, "GET", profile_pic_url, NULL, ig_got_profile_pic, buddy);
+		}
+		
+		PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
+		purple_blist_node_set_int(blistnode, "pk", pk);
+	}
+	
+}
+
+
+static void
+ig_inbox_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	//JsonObject *obj = json_node_get_object(node);
+}
+
+static void
+ig_login_successful(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	purple_connection_set_state(ia->pc, PURPLE_CONNECTION_CONNECTED);
+	
+	ig_fetch_url_with_method(ia, "GET", IG_URL_PREFIX "/friendships/autocomplete_user_list/?version=2&followinfo=True", NULL, ig_friends_cb, NULL);
+	
+	ig_fetch_url_with_method(ia, "GET", IG_URL_PREFIX "/direct_v2/inbox/", NULL, ig_inbox_cb, NULL);
+	
+	if (node != NULL) {
+		
+	}
+}
+
+static void
 ig_challenge_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 {
+	JsonObject *response = json_node_get_object(node);
 	
+	if (json_object_has_member(response, "logged_in_user")) {
+		ig_login_successful(ia, node, NULL);
+	}
 }
 
 static void
@@ -377,6 +537,8 @@ ig_login_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 								_("Cancel"), G_CALLBACK(ig_challenge_input_cancel_cb), 
 								purple_request_cpar_from_connection(ia->pc),
 								ia);
+		} else if (json_object_has_member(response, "logged_in_user")) {
+			ig_login_successful(ia, node, NULL);
 		}
 	}
 }
@@ -393,13 +555,31 @@ ig_login(PurpleAccount *account)
 	ia->pc = pc;
 	ia->cookie_table = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 	
+	const gchar *cookies = purple_account_get_string(ia->account, "cookies", NULL);
+	if (cookies != NULL) {
+		gchar **cookie_pieces = g_strsplit_set(cookies, "=;", -1);
+		gint i;
+		for (i = 0; cookie_pieces[i] && cookie_pieces[i+1]; i+=2) {
+			g_hash_table_replace(ia->cookie_table, g_strdup(cookie_pieces[i]), g_strdup(cookie_pieces[i+1]));
+			
+			if (purple_strequal(cookie_pieces[i], "csrftoken")) {
+				ia->csrftoken = g_strdup(cookie_pieces[i+1]);
+			}
+		}
+		g_strfreev(cookie_pieces);
+		
+		ig_login_successful(ia, NULL, NULL);
+		purple_connection_set_state(pc, PURPLE_CONNECTION_CONNECTING);
+	
+		return;
+	}
 	//{"_csrftoken":"missing","device_id":"android-0cc175b9c0f1b6a8","_uuid":"2054c23b-c842-48e9-bcde-463192356941","username":"a","password":"a","login_attempt_count":0}
 	JsonObject *obj = json_object_new();
 	gchar *uuid = purple_uuid_random();
 	gchar *postdata;
 	
 	json_object_set_string_member(obj, "_csrftoken", "missing");
-	json_object_set_string_member(obj, "device_id", "android-0cc175b9c0f1b6a8");
+	json_object_set_string_member(obj, "device_id", "android-0cc175b9c0f1b6a8"); //TODO generate device_id
 	json_object_set_string_member(obj, "_uuid", uuid);
 	json_object_set_string_member(obj, "username", purple_account_get_username(account));
 	json_object_set_string_member(obj, "password", purple_connection_get_password(pc));
@@ -429,8 +609,15 @@ ig_close(PurpleConnection *pc)
 		ia->http_conns = g_slist_delete_link(ia->http_conns, ia->http_conns);
 	}
 
+	// Save cookies to accounts.xml to login with later
+	gchar *cookies = ig_cookies_to_string(ia);
+	purple_account_set_string(ia->account, "cookies", cookies);
+	g_free(cookies);
 	g_hash_table_destroy(ia->cookie_table);
 	ia->cookie_table = NULL;
+	
+	g_free(ia->csrftoken);
+	g_free(ia->challenge_url);
 	
 	g_free(ia);
 }
@@ -516,7 +703,7 @@ plugin_init(PurplePlugin *plugin)
 	// prpl_info->chat_info_defaults = instagram_chat_info_defaults;
 	prpl_info->login = ig_login;
 	prpl_info->close = ig_close;
-	// prpl_info->send_im = instagram_send_im;
+	prpl_info->send_im = ig_send_im;
 	// prpl_info->send_typing = instagram_send_typing;
 	// prpl_info->join_chat = instagram_join_chat;
 	// prpl_info->get_chat_name = instagram_get_chat_name;
