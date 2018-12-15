@@ -15,7 +15,7 @@
 #define SIG_KEY_VERSION      "4"
 #define IG_SIG_KEY           "109513c04303341a7daf27bb41b268e633b30dcc65a3fe14503f743176113869"
 #define INSTAGRAM_USERAGENT  "Instagram 27.0.0.7.97 Android (22/6.0.1; 577dpi; 1440x2560; LGE; LG-P990; p990_505-xxx; en_US)"
-#define IG_URL_PREFIX        "https://i.instagram.com/api/v1/"
+#define IG_URL_PREFIX        "https://i.instagram.com/api/v1"
 
 #ifndef _
 #	define _(a) (a)
@@ -70,6 +70,7 @@ typedef struct {
 	GHashTable *cookie_table;
 
 	GSList *http_conns; /**< PurpleHttpConnection to be cancelled on logout */
+	gchar *challenge_url;
 } InstagramAccount;
 
 
@@ -281,9 +282,13 @@ ig_fetch_url_with_method(InstagramAccount *ia, const gchar *method, const gchar 
 
 		purple_http_request_header_set(request, "Content-Type", "application/x-www-form-urlencoded");
 		
-		gchar *sig = ig_generate_signature_for_post(postdata);
-		purple_http_request_set_contents(request, sig, -1);
-		g_free(sig);
+		if (postdata[0] == '{') {
+			gchar *sig = ig_generate_signature_for_post(postdata);
+			purple_http_request_set_contents(request, sig, -1);
+			g_free(sig);
+		} else {
+			purple_http_request_set_contents(request, postdata, -1);
+		}
 	}
 
 	http_conn = purple_http_request(ia->pc, request, ig_response_callback, conn);
@@ -320,13 +325,58 @@ ig_status_types(PurpleAccount *account)
 }
 
 static void
-ig_login_cb(InstagramAccount *da, JsonNode *node, gpointer user_data)
+ig_challenge_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	
+}
+
+static void
+ig_challenge_input_cb(gpointer user_data, const gchar *auth_code)
+{
+	InstagramAccount *ia = user_data;
+	
+	gchar *sec = g_strdup_printf("security_code=%s", purple_url_encode(auth_code));
+
+	ig_fetch_url_with_method(ia, "POST", ia->challenge_url, sec, ig_challenge_cb, NULL);
+	
+	g_free(sec);
+	g_free(ia->challenge_url);
+	ia->challenge_url = NULL;
+}
+
+static void
+ig_challenge_input_cancel_cb(gpointer user_data)
+{
+	InstagramAccount *ia = user_data;
+	purple_connection_error(ia->pc, PURPLE_CONNECTION_ERROR_AUTHENTICATION_IMPOSSIBLE, 
+		_("User cancelled challenge"));
+}
+
+static void
+ig_login_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 {
 	if (node != NULL) {
 		JsonObject *response = json_node_get_object(node);
 		
 		if (json_object_get_boolean_member(response, "invalid_credentials")) {
 			purple_debug_error("instagram", "%s\n", json_object_get_string_member(response, "message"));
+			
+		} else if (purple_strequal(json_object_get_string_member(response, "error_type"), "checkpoint_challenge_required")) {
+			JsonObject *challenge = json_object_get_object_member(response, "challenge");
+			const gchar *challenge_api_path = json_object_get_string_member(challenge, "api_path");
+			//"api_path": "/challenge/1234567890/asdfgqwert/",
+			
+			ia->challenge_url = g_strdup_printf("%s%s", IG_URL_PREFIX, challenge_api_path);
+			ig_fetch_url_with_method(ia, "POST", ia->challenge_url, "choice=1", NULL, NULL);
+			
+			purple_request_input(ia->pc, _("Login challenge"),
+								_("Enter the six-digit code sent to your email"),
+								NULL,
+								NULL, FALSE, FALSE, "",
+								_("OK"), G_CALLBACK(ig_challenge_input_cb), 
+								_("Cancel"), G_CALLBACK(ig_challenge_input_cancel_cb), 
+								purple_request_cpar_from_connection(ia->pc),
+								ia);
 		}
 	}
 }
@@ -356,7 +406,7 @@ ig_login(PurpleAccount *account)
 	json_object_set_int_member(obj, "login_attempt_count", 0);
 	
 	postdata = json_object_to_string(obj);
-	ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "accounts/login/", postdata, ig_login_cb, NULL);
+	ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/accounts/login/", postdata, ig_login_cb, NULL);
 	
 	g_free(uuid);
 	g_free(postdata);
