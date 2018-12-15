@@ -331,6 +331,93 @@ ig_get_or_create_default_group()
 
 static void ig_find_user(InstagramAccount *ia, const gchar *username, InstagramProxyCallbackFunc callback, gpointer user_data);
 
+
+static void
+ig_got_info(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	JsonObject *obj = json_node_get_object(node);
+	JsonObject *user = json_object_get_object_member(obj, "user");
+	PurpleNotifyUserInfo *user_info;
+	const gchar *username = json_object_get_string_member(user, "username");
+	
+	user_info = purple_notify_user_info_new();
+	
+	gchar *num_str = g_strdup_printf("%u", (guint) json_object_get_int_member(user, "pk"));
+	purple_notify_user_info_add_pair_html(user_info, _("ID"), num_str);
+	g_free(num_str);
+	
+	purple_notify_user_info_add_pair_html(user_info, _("Username"), username);
+	purple_notify_user_info_add_pair_html(user_info, _("Full name"), json_object_get_string_member(user, "full_name"));
+	purple_notify_user_info_add_pair_html(user_info, _("Verified?"), json_object_get_boolean_member(user, "is_verified") ? _("Yes") : _("No"));
+	
+	num_str = g_strdup_printf("%u", (guint) json_object_get_int_member(user, "follower_count"));
+	purple_notify_user_info_add_pair_html(user_info, _("Followers"), num_str);
+	g_free(num_str);
+	num_str = g_strdup_printf("%u", (guint) json_object_get_int_member(user, "following_count"));
+	purple_notify_user_info_add_pair_html(user_info, _("Following"), num_str);
+	g_free(num_str);
+	
+	purple_notify_user_info_add_section_break(user_info);
+	
+	purple_notify_user_info_add_pair_html(user_info, _("Bio"), json_object_get_string_member(user, "biography"));
+	purple_notify_user_info_add_pair_html(user_info, _("URL"), json_object_get_string_member(user, "external_url"));
+	
+	purple_notify_userinfo(ia->pc, username, user_info, NULL, NULL);
+}
+
+static void
+ig_get_info_by_id(PurpleConnection *pc, gint pk)
+{
+	InstagramAccount *ia = purple_connection_get_protocol_data(pc);
+	gchar *url = g_strdup_printf(IG_URL_PREFIX "/users/%u/info/", (guint) pk);
+	
+	ig_fetch_url_with_method(ia, "GET", url, NULL, ig_got_info, NULL);
+}
+
+static void
+ig_get_info_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	JsonObject *obj = json_node_get_object(node);
+	gchar *who = user_data;
+	gint pk = (gint) json_object_get_int_member(obj, "pk");
+	
+	g_hash_table_replace(ia->user_ids, who, GINT_TO_POINTER(pk));
+	PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, who);
+	
+	if (buddy != NULL) {
+		PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
+		purple_blist_node_set_int(blistnode, "pk", pk);
+	}
+	
+	ig_get_info_by_id(ia->pc, pk);
+}
+
+static void
+ig_get_info(PurpleConnection *pc, const gchar *who)
+{
+	InstagramAccount *ia = purple_connection_get_protocol_data(pc);
+	gint pk = 0;
+	
+	pk = GPOINTER_TO_INT(g_hash_table_lookup(ia->user_ids, who));
+	
+	if (pk == 0) {
+		PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, who);
+		
+		if (buddy != NULL) {
+			PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
+			pk = purple_blist_node_get_int(blistnode, "pk");
+			
+			g_hash_table_replace(ia->user_ids, (gpointer) who, GINT_TO_POINTER(pk));
+		}
+	}
+	
+	if (pk != 0) {
+		ig_get_info_by_id(pc, pk);
+	} else {
+		ig_find_user(ia, who, ig_get_info_found_user, g_strdup(who));
+	}
+}
+
 static void
 ig_send_im_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 {
@@ -955,7 +1042,7 @@ plugin_init(PurplePlugin *plugin)
 	// prpl_info->remove_buddy = instagram_buddy_remove;
 	// prpl_info->group_buddy = instagram_fake_group_buddy;
 	// prpl_info->rename_group = instagram_fake_group_rename;
-	// prpl_info->get_info = instagram_get_info;
+	prpl_info->get_info = ig_get_info;
 	// prpl_info->add_deny = instagram_block_user;
 	// prpl_info->rem_deny = instagram_unblock_user;
 
