@@ -330,7 +330,7 @@ ig_get_or_create_default_group()
 }
 
 static void ig_find_user(InstagramAccount *ia, const gchar *username, InstagramProxyCallbackFunc callback, gpointer user_data);
-
+static void ig_add_buddy_from_json(InstagramAccount *ia, JsonObject *user);
 
 static void
 ig_got_info(InstagramAccount *ia, JsonNode *node, gpointer user_data)
@@ -378,16 +378,7 @@ static void
 ig_get_info_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 {
 	JsonObject *obj = json_node_get_object(node);
-	gchar *who = user_data;
 	gint pk = (gint) json_object_get_int_member(obj, "pk");
-	
-	g_hash_table_replace(ia->user_ids, who, GINT_TO_POINTER(pk));
-	PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, who);
-	
-	if (buddy != NULL) {
-		PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
-		purple_blist_node_set_int(blistnode, "pk", pk);
-	}
 	
 	ig_get_info_by_id(ia->pc, pk);
 }
@@ -414,8 +405,29 @@ ig_get_info(PurpleConnection *pc, const gchar *who)
 	if (pk != 0) {
 		ig_get_info_by_id(pc, pk);
 	} else {
-		ig_find_user(ia, who, ig_get_info_found_user, g_strdup(who));
+		ig_find_user(ia, who, ig_get_info_found_user, NULL);
 	}
+}
+
+static void
+ig_add_buddy_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
+{
+	ig_add_buddy_from_json(ia, json_node_get_object(node));
+}
+
+static void
+ig_add_buddy_with_invite(PurpleConnection *pc, PurpleBuddy *buddy, PurpleGroup *group, const char *message)
+{
+	InstagramAccount *ia = purple_connection_get_protocol_data(pc);
+	const gchar *who = purple_buddy_get_name(buddy);
+	
+	ig_find_user(ia, who, ig_add_buddy_found_user, NULL);
+}
+	
+static void
+ig_add_buddy(PurpleConnection *pc, PurpleBuddy *buddy, PurpleGroup *group)
+{
+	ig_add_buddy_with_invite(pc, buddy, group, NULL);
 }
 
 static void
@@ -572,6 +584,13 @@ ig_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 		
 		if (purple_strequal(username, orig_username)) {
 			JsonNode *user_node = json_array_get_element(users, i);
+			PurpleBuddy *buddy = purple_blist_find_buddy(ia->account, username);
+			
+			if (buddy != NULL) {
+				PurpleBlistNode *blistnode = PURPLE_BLIST_NODE(buddy);
+				purple_blist_node_set_int(blistnode, "pk", pk);
+			}
+			
 			conn->callback(ia, user_node, conn->user_data);
 		}
 		
@@ -1038,7 +1057,7 @@ plugin_init(PurplePlugin *plugin)
 	// prpl_info->chat_send = instagram_chat_send;
 	// prpl_info->set_chat_topic = instagram_chat_set_topic;
 	// prpl_info->get_cb_real_name = instagram_get_real_name;
-	// prpl_info->add_buddy = instagram_add_buddy;
+	prpl_info->add_buddy = ig_add_buddy;
 	// prpl_info->remove_buddy = instagram_buddy_remove;
 	// prpl_info->group_buddy = instagram_fake_group_buddy;
 	// prpl_info->rename_group = instagram_fake_group_rename;
