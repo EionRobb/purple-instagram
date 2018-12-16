@@ -759,7 +759,6 @@ ig_thread_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 						msg = purple_message_new_outgoing(username, text, PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND | PURPLE_MESSAGE_DELAYED);
 						purple_message_set_time(msg, timestamp);
 						purple_conversation_write_message(conv, msg);
-						purple_message_destroy(msg);
 					}
 				}
 			}
