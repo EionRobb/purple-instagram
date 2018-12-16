@@ -730,9 +730,15 @@ ig_thread_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 			
 			gint64 sender = json_object_get_int_member(item, "user_id");
 			const gchar *item_type = json_object_get_string_member(item, "item_type");
-			const gchar *text = json_object_get_string_member(item, "text");
+			const gchar *text = NULL;
 			
 			if (purple_strequal(item_type, "text")) {
+				text = json_object_get_string_member(item, "text");
+			} else if (purple_strequal(item_type, "media")) {
+				text = json_object_get_string_member(json_array_get_object_element(json_object_get_array_member(json_object_get_object_member(json_object_get_object_member(item, "media"), "image_versions2"), "candidates"), 0), "url");
+			}
+			
+			if (text != NULL) {
 				if (sender == user_id) {
 					purple_serv_got_im(ia->pc, username, text, PURPLE_MESSAGE_RECV, timestamp);
 					
