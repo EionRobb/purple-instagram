@@ -454,18 +454,20 @@ ig_send_im_found_user(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 		gchar *uuid = purple_uuid_random();
 		gchar *context = purple_uuid_random();
 		gint64 pk = json_object_get_int_member(obj, "pk");
+		gchar *stripped = purple_markup_strip_html(message);
 		
 		g_string_append_printf(postdata, "_csrftoken=%s&", purple_url_encode(ia->csrftoken));
 		g_string_append_printf(postdata, "device_id=%s&", purple_url_encode(ia->device_id));
 		g_string_append_printf(postdata, "_uuid=%s&", purple_url_encode(uuid));
 		g_string_append_printf(postdata, "recipient_users=[[%" G_GINT64_FORMAT "]]&", pk);
 		g_string_append_printf(postdata, "client_context=%s&", purple_url_encode(context));
-		g_string_append_printf(postdata, "text=%s&", purple_url_encode(message));
+		g_string_append_printf(postdata, "text=%s&", purple_url_encode(stripped));
 		
 		ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/direct_v2/threads/broadcast/text/", postdata->str, NULL /* TODO check response */, NULL);
 		
 		//TODO store context into hashtable
 		g_free(context);
+		g_free(stripped);
 		g_free(uuid);
 		g_string_free(postdata, TRUE);
 		
@@ -510,18 +512,20 @@ ig_send_im(PurpleConnection *pc,
 		GString *postdata = g_string_new(NULL);
 		gchar *uuid = purple_uuid_random();
 		gchar *context = purple_uuid_random();
+		gchar *stripped = purple_markup_strip_html(message);
 		
 		g_string_append_printf(postdata, "_csrftoken=%s&", purple_url_encode(ia->csrftoken));
 		g_string_append_printf(postdata, "device_id=%s&", purple_url_encode(ia->device_id));
 		g_string_append_printf(postdata, "_uuid=%s&", purple_url_encode(uuid));
 		g_string_append_printf(postdata, "recipient_users=[[%s]]&", pk);
 		g_string_append_printf(postdata, "client_context=%s&", purple_url_encode(context));
-		g_string_append_printf(postdata, "text=%s&", purple_url_encode(message));
+		g_string_append_printf(postdata, "text=%s&", purple_url_encode(stripped));
 		
 		ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/direct_v2/threads/broadcast/text/", postdata->str, NULL /* TODO check response */, NULL);
 		
 		//TODO store context into hashtable
 		g_free(context);
+		g_free(stripped);
 		g_free(uuid);
 		g_string_free(postdata, TRUE);
 		
