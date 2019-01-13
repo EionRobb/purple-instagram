@@ -785,8 +785,7 @@ ig_inbox_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 		
 		if (!json_object_get_boolean_member(thread, "is_group")) {
 			// This is a one-to-one DM
-			JsonObject *user = json_array_get_object_element(json_object_get_array_member(thread, "users"), 0);
-			ig_add_buddy_from_json(ia, user);
+			//JsonObject *user = json_array_get_object_element(json_object_get_array_member(thread, "users"), 0);
 		}
 		
 		//Use last_activity_at to work out if there's a newer message
