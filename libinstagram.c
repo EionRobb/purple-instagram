@@ -343,6 +343,7 @@ ig_get_or_create_default_group()
 
 static void ig_find_user(InstagramAccount *ia, const gchar *username, InstagramProxyCallbackFunc callback, gpointer user_data);
 static void ig_add_buddy_from_json(InstagramAccount *ia, JsonObject *user);
+static void ig_login_send_password(InstagramAccount *ia);
 
 static void
 ig_got_info(InstagramAccount *ia, JsonNode *node, gpointer user_data)
@@ -759,7 +760,7 @@ ig_thread_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 
 					conv = PURPLE_CONVERSATION(imconv);
 
-					if (text && *text) {
+					if (*text) {
 						msg = purple_message_new_outgoing(username, text, PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND | PURPLE_MESSAGE_DELAYED);
 						purple_message_set_time(msg, timestamp);
 						purple_conversation_write_message(conv, msg);
@@ -779,6 +780,23 @@ ig_inbox_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 	gint i;
 	gint64 max_last_activity = 0;
 	gint last_message_timestamp = (gint) (ia->last_message_timestamp / 1000000);
+	
+	if (json_object_has_member(obj, "logout_reason")) {
+		gint64 logout_reason = json_object_get_int_member(obj, "logout_reason");
+		
+		if (logout_reason == 2) {
+			g_hash_table_remove_all(ia->cookie_table);
+			g_free(ia->csrftoken);
+			ia->csrftoken = NULL;
+			
+			ig_login_send_password(ia);
+			return;
+		}
+		
+		const gchar *error_title = json_object_get_string_member(obj, "error_title");
+		purple_connection_error(ia->pc, PURPLE_CONNECTION_ERROR_AUTHENTICATION_FAILED, error_title);
+		return;
+	}
 	
 	for (i = json_array_get_length(threads) - 1; i >= 0; i--) {
 		JsonObject *thread = json_array_get_object_element(threads, i);
@@ -868,7 +886,9 @@ ig_login_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 		JsonObject *response = json_node_get_object(node);
 		
 		if (json_object_get_boolean_member(response, "invalid_credentials")) {
-			purple_debug_error("instagram", "%s\n", json_object_get_string_member(response, "message"));
+			const gchar *message = json_object_get_string_member(response, "message");
+			purple_connection_error(ia->pc, PURPLE_CONNECTION_ERROR_AUTHENTICATION_FAILED, message);
+			purple_debug_error("instagram", "%s\n", message);
 			
 		} else if (purple_strequal(json_object_get_string_member(response, "error_type"), "checkpoint_challenge_required")) {
 			JsonObject *challenge = json_object_get_object_member(response, "challenge");
@@ -890,6 +910,30 @@ ig_login_cb(InstagramAccount *ia, JsonNode *node, gpointer user_data)
 			ig_login_successful(ia, node, NULL);
 		}
 	}
+}
+
+static void
+ig_login_send_password(InstagramAccount *ia)
+{
+	JsonObject *obj = json_object_new();
+	gchar *uuid = purple_uuid_random();
+	gchar *postdata;
+	
+	json_object_set_string_member(obj, "_csrftoken", "missing");
+	json_object_set_string_member(obj, "device_id", ia->device_id);
+	json_object_set_string_member(obj, "_uuid", uuid);
+	json_object_set_string_member(obj, "username", purple_account_get_username(ia->account));
+	json_object_set_string_member(obj, "password", purple_connection_get_password(ia->pc));
+	json_object_set_int_member(obj, "login_attempt_count", 0);
+	
+	postdata = json_object_to_string(obj);
+	ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/accounts/login/", postdata, ig_login_cb, NULL);
+	
+	g_free(uuid);
+	g_free(postdata);
+	json_object_unref(obj);
+	
+	purple_connection_set_state(ia->pc, PURPLE_CONNECTION_CONNECTING);
 }
 		
 static void
@@ -937,26 +981,7 @@ ig_login(PurpleAccount *account)
 		}
 	}
 	
-	JsonObject *obj = json_object_new();
-	gchar *uuid = purple_uuid_random();
-	gchar *postdata;
-	
-	json_object_set_string_member(obj, "_csrftoken", "missing");
-	json_object_set_string_member(obj, "device_id", ia->device_id);
-	json_object_set_string_member(obj, "_uuid", uuid);
-	json_object_set_string_member(obj, "username", purple_account_get_username(account));
-	json_object_set_string_member(obj, "password", purple_connection_get_password(pc));
-	json_object_set_int_member(obj, "login_attempt_count", 0);
-	
-	postdata = json_object_to_string(obj);
-	ig_fetch_url_with_method(ia, "POST", IG_URL_PREFIX "/accounts/login/", postdata, ig_login_cb, NULL);
-	
-	g_free(uuid);
-	g_free(postdata);
-	json_object_unref(obj);
-	
-	
-	purple_connection_set_state(pc, PURPLE_CONNECTION_CONNECTING);
+	ig_login_send_password(ia);
 }
 
 
