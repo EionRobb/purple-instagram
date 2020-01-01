@@ -1,7 +1,27 @@
-# purple-instagram
+=# purple-instagram
 Instagram protocol plugin for libpurple
 
+Prerequisites
+-
+Make sure you are running the most recent build of pidgin/libpurple (2.13.0)
 
-Install with ``` make && make install  ```.  You'll need development packages for libpurple, libjson-glib, and glib to be able to compile.
+install necessary development libraries if not already present:
+```bash
+  sudo apt install libglib2.0-dev
+  sudo apt install libjson-glib-dev
+  sudo apt install libpurple-dev
+  sudo apt update 
+``` 
+Of course, if you are using another distribution such as fedora, you would replace apt with the relevant package manager. (e.g: yum or dnf)
 
-Windows dll at https://eion.robbmob.com/libinstagram.dll
+Linux
+-
+```bash
+  git clone https://github.com/SherbetS44105/purple-instagram.git
+  cd ~/purple-instagram
+  make
+  sudo make install
+```
+Windows
+-
+To download for Windows, extract the dll file found here: https://eion.robbmob.com/libinstagram.dll to ```%APPDATA%/.purple/plugins. ```
