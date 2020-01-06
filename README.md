@@ -22,6 +22,9 @@ Linux
   make
   sudo make install
 ```
+
+after compiled, copy the libinstagram.so file into the ./purple/plugins directory, wherever that may be on your computer.
+
 Windows
 -
 To download for Windows, extract the dll file found here: https://eion.robbmob.com/libinstagram.dll to ```%APPDATA%/.purple/plugins. ```
