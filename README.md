@@ -23,7 +23,7 @@ Linux
   sudo make install
 ```
 
-after compiled, copy the libinstagram.so file into the ./purple/plugins directory, wherever that may be on your computer.
+after compiled, copy the libinstagram.so file into the /.purple/plugins directory, wherever that may be on your computer.
 
 Windows
 -
