@@ -10,7 +10,7 @@ MAKENSIS ?= makensis
 PKG_CONFIG ?= pkg-config
 
 CFLAGS	?= -O2 -g -pipe
-LDFLAGS ?= 
+LDFLAGS ?=
 
 # Do some nasty OS and purple version detection
 ifeq ($(OS),Windows_NT)
@@ -39,7 +39,7 @@ else
 
     CC = gcc
   else
-    INCLUDES = 
+    INCLUDES =
     CC ?= gcc
   endif
 
@@ -74,7 +74,7 @@ TEST_C_FILES := instagram_test.c $(C_FILES)
 
 
 
-.PHONY:	all install FAILNOPURPLE clean
+.PHONY:	all install install-icons FAILNOPURPLE clean
 
 all: $(INSTAGRAM_TARGET)
 
@@ -93,7 +93,7 @@ libinstagram3.dll: $(PURPLE_C_FILES)
 instagram-test.exe: $(TEST_C_FILES) $(PURPLE_COMPAT_FILES)
 	$(WIN32_CC) -o $@ -DDEBUG $^ $(WIN32_PIDGIN2_CFLAGS) $(WIN32_PIDGIN2_LDFLAGS) -Ipurple2compat
 
-install: $(INSTAGRAM_TARGET)
+install: $(INSTAGRAM_TARGET) install-icons
 	mkdir -p $(INSTAGRAM_DEST)
 	install -p $(INSTAGRAM_TARGET) $(INSTAGRAM_DEST)
 
